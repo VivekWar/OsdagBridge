@@ -66,6 +66,12 @@ def calculate_material_quantities(inputs: dict, outputs: dict) -> dict:
         "bracing_diag_wt_single": "N.A.",
         "bracing_diag_wt_total": "N.A.",
         
+        "end_diaphragm_vol_formula": r"\placeholder{Area $\times$ Length}",
+        "end_diaphragm_qty": "N.A.",
+        "end_diaphragm_vol_total": "N.A.",
+        "end_diaphragm_wt_single": "N.A.",
+        "end_diaphragm_wt_total": "N.A.",
+
         "concrete_deck_vol_formula": r"\placeholder{Width $\times$ Thickness $\times$ Length}",
         "concrete_deck_qty": "N.A.",
         "concrete_deck_vol_total": "N.A.",
@@ -329,6 +335,33 @@ def calculate_material_quantities(inputs: dict, outputs: dict) -> dict:
                 quantities[f"{prefix}_vol_total"] = "N.A."
                 quantities[f"{prefix}_wt_single"] = "N.A."
                 quantities[f"{prefix}_wt_total"] = "N.A."
+
+        # 5d. End Diaphragms (Cu.m) and Weight (MT)
+        # One bracing frame (two diagonals + enabled chords) closes every
+        # girder bay at each of the two supports.
+        for _k in ("vol_formula", "qty", "vol_total", "wt_single", "wt_total"):
+            quantities[f"end_diaphragm_{_k}"] = "N.A."
+        try:
+            ed_area_val = outputs.get("transverse_member_design.ed.section_properties.end_diaphragm.G1G2.A")
+            ed_geom = (outputs.get("end_diaphragm_forces_dict") or {}).get("geometry") or {}
+            cb_geom_ed = (outputs.get("crossbracing_forces_dict") or {}).get("geometry") or {}
+            ed_diag_len = ed_geom.get("diagonal_length_m") or cb_geom_ed.get("diagonal_length_m")
+            if ed_area_val is not None and ed_diag_len and spacing > 0.0 and n_girders > 1:
+                ed_area = float(ed_area_val) / 10000.0  # cm² to m²
+                ed_top = bool(ed_geom.get("top_chord", True))
+                ed_bot = bool(ed_geom.get("bottom_chord", True))
+                frame_len = 2.0 * float(ed_diag_len) + (int(ed_top) + int(ed_bot)) * spacing
+                if ed_area > 0.0 and frame_len > 0.0:
+                    ed_qty = 2 * (n_girders - 1)
+                    ed_vol_single = ed_area * frame_len
+                    ed_vol_total = ed_qty * ed_vol_single
+                    quantities["end_diaphragm_vol_formula"] = f"${ed_area:.5f}\\text{{ m}}^2 \\times {frame_len:.2f}\\text{{ m}} = {ed_vol_single:.5f}\\text{{ m}}^3$"
+                    quantities["end_diaphragm_qty"] = str(ed_qty)
+                    quantities["end_diaphragm_vol_total"] = f"{ed_vol_total:.2f}"
+                    quantities["end_diaphragm_wt_single"] = f"{ed_vol_single * 7.85:.4f}"
+                    quantities["end_diaphragm_wt_total"] = f"{ed_vol_total * 7.85:.2f}"
+        except Exception:
+            pass
 
         # 6. Crash Barrier (Cu.m) and Weight (MT)
         KEY_CB_AREA = "typical_section.crash_barrier.area"
