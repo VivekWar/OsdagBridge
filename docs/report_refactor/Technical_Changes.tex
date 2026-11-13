@@ -1,0 +1,367 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[left=20mm,right=20mm,top=24mm,bottom=24mm,headheight=14pt]{geometry}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{osdagGreen}{HTML}{91B014}
+\definecolor{osdagDark}{HTML}{55690C}
+\definecolor{headBg}{HTML}{E4ECC3}
+\definecolor{codeBg}{HTML}{F6F7F1}
+\definecolor{muted}{HTML}{5C5C5C}
+\definecolor{bad}{HTML}{C62828}
+\definecolor{good}{HTML}{2E7D32}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\renewcommand{\arraystretch}{1.25}
+\setlist{itemsep=1pt,topsep=3pt,parsep=0pt,leftmargin=1.5em}
+\captionsetup{font={small,sf},labelfont={bf,color=osdagDark},skip=4pt}
+\titleformat{\section}{\sffamily\Large\bfseries\color{osdagDark}}{\thesection}{0.6em}{}[\vspace{2pt}{\color{osdagGreen}\titlerule[0.9pt]}]
+\titleformat{\subsection}{\sffamily\large\bfseries}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{14pt}{8pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\sffamily\footnotesize OsdagBridge --- LaTeX Report Generator Refactoring \& Enhancements}
+\fancyhead[R]{\sffamily\footnotesize Technical Changes Document}
+\fancyfoot[L]{\sffamily\footnotesize Vivek Manik Warkad}
+\fancyfoot[R]{\sffamily\footnotesize Page \thepage}
+\renewcommand{\headrule}{{\color{osdagGreen}\hrule height 0.8pt}}
+\renewcommand{\footrulewidth}{0pt}
+
+\newcommand{\file}[1]{{\footnotesize\ttfamily #1}}
+\newcommand{\code}[1]{{\small\ttfamily #1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newenvironment{codeblock}{\par\small\begingroup}{\endgroup\par}
+\newcommand{\cmp}[3]{% file, caption, label
+  \begin{figure}[H]\centering
+  \includegraphics[width=0.88\textwidth]{img/#1}
+  \caption{#2}\label{#3}
+  \end{figure}}
+
+\begin{document}
+
+% ---------------------------------------------------------------- title block
+\begin{center}
+{\sffamily\Huge\bfseries OsdagBridge\par}
+\vspace{2pt}
+{\sffamily\Large LaTeX Report Generator --- Refactoring \& Enhancements\par}
+\vspace{4pt}
+{\color{osdagGreen}\rule{0.4\textwidth}{1.2pt}\par}
+\vspace{4pt}
+{\sffamily\large\bfseries\color{osdagDark} Technical Changes Document\par}
+\end{center}
+
+\begin{center}
+\begin{tabular}{@{}L{0.22\textwidth}L{0.70\textwidth}@{}}
+\toprule
+\textbf{Author} & Vivek Manik Warkad (IIT Kanpur) \\
+\textbf{Repository} & \url{https://github.com/VivekWar/OsdagBridge} (fork of \code{Nidhikhare12/OsdagBridge}, branch \code{dev}) \\
+\textbf{Scope} & \file{src/osdagbridge/core/reports/} (plus the quantity generator in \file{core/boq/}) \\
+\textbf{Deliverables} & \file{Report\_Before.pdf}, \file{Report\_After.pdf}, this document, source code, unit tests, demo video \\
+\textbf{Test design} & Plate girder highway bridge, 30 m span, 10.5 m carriageway, 5 girders, Pune (Maharashtra), all eight IRC vehicles selected --- identical inputs for the ``before'' and ``after'' report \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Summary}
+
+The report generator of OsdagBridge assembled the design report from large raw-LaTeX string templates.
+Formatting values (column widths in cm, \code{\textbackslash vspace}, fonts, colours) were repeated in every chapter file, tables that ran over a page lost their header, and row-spanning labels could end up in the footer.
+The generator was refactored so that
+
+\begin{itemize}
+\item \textbf{every} table is a PyLaTeX \code{LongTable} produced by \emph{one} builder --- caption and column headers repeat on every page a table runs onto;
+\item nothing can overlap the footer any more: row groups are unbreakable, the page geometry reserves the footer space, and page-bottom thresholds decide when a block starts on a new page;
+\item vehicle and footpath live loads are reported in separate tables with unit columns, listing exactly the vehicles ticked in the \emph{Loading} tab;
+\item Section~5.5 shows utilization-ratio bar charts with a red dashed line at UR~=~1.0, Chapter~7 shows material-quantity charts --- both generated with matplotlib during the report build and embedded with PyLaTeX \code{Figure};
+\item \file{styles.py} is the single source of truth for all formatting; chapter files contain content only (enforced by a unit test).
+\end{itemize}
+
+Table~\ref{tab:scope} maps each item of the task to the place where it is implemented.
+The numerical content of the report is unchanged: the same stored design results are read, only their presentation differs (the few intentional content changes are listed in Section~\ref{sec:content}).
+
+\begin{longtable}{@{}L{0.19\textwidth}L{0.45\textwidth}L{0.30\textwidth}@{}}
+\caption{Task items and where they are implemented}\label{tab:scope}\\
+\toprule
+\textbf{Task item} & \textbf{What was done} & \textbf{Main code} \\
+\midrule
+\endfirsthead
+\caption[]{Task items and where they are implemented (continued)}\\
+\toprule
+\textbf{Task item} & \textbf{What was done} & \textbf{Main code} \\
+\midrule
+\endhead
+1. Repeated table headers &
+All 61 tables are \code{longtable}s with \code{\textbackslash endfirsthead} / \code{\textbackslash endhead}; a ``(continued)'' caption and the (one- or two-level) column header repeat on each page, ``Continued on next page'' closes a broken page. &
+\file{tables.py}: \code{ReportLongTable}, \code{table()} \\
+2. Layout, footer overlap, spacing &
+Row groups (e.g. all rows of ``G4'') are unbreakable; table notes are the last row of their table; bottom margin and footskip enlarged; penalty-free page-bottom thresholds for tables, figures and headings; short tables are never split; widow/orphan control for table rows. &
+\file{tables.py}: \code{\_body\_rows()}; \file{styles.py}: \code{PAGE}, \code{SPACING}, \code{TABLE} \\
+3. Load \& geometry tables &
+Separate \emph{Vehicle Live Loads} table (Vehicle, Total Load, Impact Factor, Braking Load: Considered? / Value / Eccentricity), \emph{Braking and Centrifugal Forces} table and \emph{Footpath Live Load} table; unit columns in all load and geometry tables; vehicles taken from the Loading-tab check boxes. &
+\file{live\_loads.py}, \file{chap3.py}, \file{chap2.py} \\
+4. UR bar charts (5.5) &
+Two charts: governing UR per element (girders, deck slab, cross bracing, end diaphragms) and UR of every summary check; red dashed line at UR~=~1.0, failing bars hatched red. &
+\file{charts.py}, \file{design\_summary.py}, \file{chap5.py} \\
+5. Quantity charts (Ch.~7) &
+Structural steel tonnage by component; deck concrete volume (m\textsuperscript{3}) against reinforcement weight (MT) on two axes. Images are written to the temporary build directory and embedded with PyLaTeX \code{Figure}. &
+\file{charts.py}, \file{chap7.py}, \file{figures.py}, \file{boq\_generator.py} \\
+6. Central style module &
+\file{styles.py}: page, colours, fonts, spacing, table metrics, named column layouts, header/footer, figure widths, chart theme, units. Chapters refer to layouts and widths \emph{by name}. &
+\file{styles.py} \\
+\bottomrule
+\end{longtable}
+
+\section{Before and after}
+
+The comparison pages below come from \file{Report\_Before.pdf} (upstream \code{dev}, commit \code{d74f56d}) and \file{Report\_After.pdf}, both generated through the desktop application for the same design.
+
+\cmp{cmp_headers.png}{Repeated headers. Before (left): the continuation page of the girder property table starts without caption or column header, and the girder label has lost its rows. After (right): ``Table 5.1 (continued)'' with the header row, and each girder group is complete on its page.}{fig:headers}
+
+\cmp{cmp_footer.png}{Footer overlap. Before (left): the table runs to the footer rule and the row-spanning label ``G3'' sits on it. After (right): groups are kept together, the table ends above the footer with a ``Continued on next page'' line.}{fig:footer}
+
+\cmp{cmp_loads.png}{Live loads. Before (left): one merged table, empty footpath and braking cells. After (right): separate vehicle table (two-level \emph{Braking Load} header, unit columns), braking / centrifugal forces and footpath load.}{fig:loads}
+
+\cmp{cmp_charts.png}{New charts. Left: Section~5.5 utilization ratios with the UR~=~1.0 limit line. Right: Chapter~7 quantity summary and structural steel tonnage.}{fig:charts}
+
+\section{Files altered}
+
+All paths are relative to \file{src/osdagbridge/}. ``$+$ / $-$'' are added / removed lines against upstream \code{dev}.
+
+\begin{longtable}{@{}L{0.31\textwidth}L{0.08\textwidth}L{0.10\textwidth}L{0.43\textwidth}@{}}
+\caption{Files added or changed}\label{tab:files}\\
+\toprule
+\textbf{File} & \textbf{Status} & \textbf{$+$ / $-$} & \textbf{Role} \\
+\midrule
+\endfirsthead
+\caption[]{Files added or changed (continued)}\\
+\toprule
+\textbf{File} & \textbf{Status} & \textbf{$+$ / $-$} & \textbf{Role} \\
+\midrule
+\endhead
+\file{core/reports/styles.py} & new & 897 / 0 & Single source of truth for all formatting; emits the LaTeX preamble. \\
+\file{core/reports/tables.py} & new & 440 / 0 & Table builder on PyLaTeX \code{LongTable}: repeated headers, groups, bands, notes, keep-together logic. \\
+\file{core/reports/figures.py} & new & 113 / 0 & Figure builder on PyLaTeX \code{Figure}; relative image paths. \\
+\file{core/reports/charts.py} & new & 286 / 0 & matplotlib bar charts (UR and material quantities). \\
+\file{core/reports/live\_loads.py} & new & 232 / 0 & Data for the live-load tables (selected vehicles, impact, braking, footpath). \\
+\file{core/reports/design\_summary.py} & new & 339 / 0 & Governing checks per element; feeds the 5.5 table, the UR charts and the executive summary. \\
+\file{core/reports/data\_bridge.py} & new & 146 / 0 & Read-only access to stored results (moved out of \file{report\_generator.py}, returns numbers instead of LaTeX). \\
+\file{core/reports/report\_generator.py} & changed & 166 / 489 & Orchestration: PyLaTeX \code{Document}, title page, TOC, chapter assembly, pdflatex passes. Public API unchanged. \\
+\file{core/reports/chap1.py} \dots\ \newline \file{chap9.py}, \file{executive\_summary.py} & changed & 1918 / 2754 & Chapter content rewritten on the builders; no formatting values left. \\
+\file{core/reports/report\_utils.py} & changed & 101 / 53 & Escaping (incl.\ Unicode from check names), number formatting, mm conversion. \\
+\file{core/boq/boq\_generator.py} & changed & 33 / 0 & End-diaphragm steel quantity (needed for the tonnage chart). \\
+\file{tests/unit/test\_report\_layout.py} & new & 315 / 0 & 29 unit tests of the layout system. \\
+\file{tools/report\_demo.py}, \newline\file{tools/render\_report.py} & new & 381 / 0 & Reproducible generation of the before/after reports through the real GUI; fast re-rendering from a stored payload. \\
+\file{pyproject.toml}, \file{requirements.txt}, \newline\file{environment.yml} & changed & 6 / 0 & \code{pylatex} added as a dependency. \\
+\bottomrule
+\end{longtable}
+
+\section{Structure of the style module}
+
+\file{styles.py} uses only the Python standard library. Each group of settings is a frozen dataclass with one module-level instance; functions at the end of the module turn the values into LaTeX.
+
+\begin{longtable}{@{}L{0.24\textwidth}L{0.70\textwidth}@{}}
+\caption{Contents of \file{styles.py}}\label{tab:styles}\\
+\toprule
+\textbf{Object} & \textbf{Defines} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Object} & \textbf{Defines} \\
+\midrule
+\endhead
+\code{PAGE} & Document class, paper, font size, margins, head/foot distances, line spacing. \code{geometry\_options()} is passed to PyLaTeX's \code{Document}. \\
+\code{COLORS} & One palette for LaTeX \emph{and} matplotlib (brand green, text, table fills, status colours, chart series). Attribute name = LaTeX colour name; \code{COLORS.mpl(name)} gives the matplotlib value. \\
+\code{FONTS} & Font switches for headings, tables (normal / compact), captions, notes, running heads. \\
+\code{SPACING} & Space around blocks and headings, and the page-bottom thresholds (minimum space required to start a table, figure, heading). \\
+\code{TABLE} & Cell padding, row stretch, rule widths, header/band fills, ``continued'' wording, keep-together switches, widow/orphan limits, size-estimate metrics. \\
+\code{TABLE\_LAYOUTS} & 35 named column layouts, e.g. \code{"vehicle\_live\_load"}: alignment + \emph{relative} width per column. The builder normalises the weights, so every table spans exactly the text width whatever the margins are. \\
+\code{HEADER\_FOOTER} & Running header/footer texts, rule colour and width, the software-default note. \\
+\code{FIGURE} & Named figure widths (\code{full}, \code{wide}, \code{medium}, \code{chart}, \code{third}), maximum height, float placement, logo sizes. \\
+\code{CHART} & matplotlib theme: sizes, fonts, bar look, element/material colours, threshold value, colour, dash style and label. \\
+\code{UNITS}, \code{TEXT} & Unit strings (kN-m, kN/m\textsuperscript{2}, \dots) and fixed wording (PASS / FAIL, N/A, column titles). \\
+\code{latex\_packages()},\newline \code{document\_arguments()},\newline \code{preamble\_tex()} & The package list, the keyword arguments of \code{pylatex.Document} and the complete style preamble (colour definitions, column types, semantic macros, caption / heading / TOC / list set-up, header and footer). \\
+\code{status\_tex()},\newline \code{pass\_fail()},\newline \code{ratio\_tex()} & Semantic helpers: coloured PASS / FAIL / WARN cells, highlighted ratios above 1.0. \\
+\bottomrule
+\end{longtable}
+
+\textbf{How chapters use it.} A chapter passes content and \emph{names}:
+
+\begin{codeblock}
+\begin{verbatim}
+T.table("Vehicle Live Loads (LL) --- IRC 6",          # caption
+        "vehicle_live_load",                          # layout name from styles.TABLE_LAYOUTS
+        ("Vehicle", "Total Load (kN)", "Impact Factor",
+         T.Span("Braking Load", ("Considered?", "Value (kN)", "Eccentricity (m)"))),
+        rows, note="...", label="tab:vehicle-live-loads")
+
+F.figure(path, "Governing utilization ratio ...", width="chart")   # width name from styles.FIGURE
+\end{verbatim}
+\end{codeblock}
+
+Changing a colour, the table padding, the margins or a column width is a one-line edit in \file{styles.py}; no chapter file has to be touched. The unit test \code{test\_chapter\_files\_contain\_no\_formatting\_rules} fails if a chapter file contains \code{\textbackslash hline}, \code{\textbackslash vspace}, \code{\textbackslash textcolor}, \code{\textbackslash begin\{longtable\}}, explicit lengths and similar markup.
+
+\section{Key code and LaTeX changes}
+
+\subsection{Repeated headers (\file{tables.py})}
+
+\code{ReportLongTable} subclasses PyLaTeX's \code{LongTable} and adds what PyLaTeX does not expose: \code{\textbackslash endfirsthead}, captions inside the table, rows ending in \code{\textbackslash\textbackslash*} and break-free rules. \code{table()} writes the caption and header twice --- once for the first page, once for all following pages:
+
+\begin{codeblock}
+\begin{verbatim}
+\begin{longtable}{|C{0.12\rptTableWidth}|L{0.50\rptTableWidth}|...|}
+\caption{Girder Section Properties}\label{tab:girder-section-properties}\\ \hline
+\rowcolor{rptHeadBg}\rpthead{Girder} & \rpthead{Property} & ... \\ \hline
+\endfirsthead
+\caption[]{Girder Section Properties (continued)}\\ \hline      % no second table number
+\rowcolor{rptHeadBg}\rpthead{Girder} & \rpthead{Property} & ... \\ \hline
+\endhead
+\rptcontinued{4} \\                                             % "Continued on next page"
+\endfoot
+\endlastfoot
+\end{verbatim}
+\end{codeblock}
+
+Two-level headers (\code{T.Span}) are built with \code{\textbackslash multicolumn}; single cells that span both header rows use a negative \code{\textbackslash multirow} so the row fill does not paint over them, and \code{\textbackslash hhline} draws the rule between the two levels.
+
+\subsection{Footer overlap: root causes and fixes}
+
+Three independent causes were found in the original output.
+
+\begin{enumerate}
+\item \textbf{Row groups were breakable.} A girder label was a \code{\textbackslash multirow} over up to 13 rows. When the page broke inside the group, the label was typeset relative to rows that were no longer on the page and landed in the footer. Now every row of a group except the last ends in \code{\textbackslash\textbackslash*}. That alone is not enough: \code{\textbackslash hline} contains a deliberate break opportunity and \code{\textbackslash cline} is followed by a breakable skip. Rules inside a group are therefore drawn with \code{\textbackslash hhline} followed by an explicit \code{\textbackslash noalign\{\textbackslash nobreak\}}:
+\begin{codeblock}
+\begin{verbatim}
+\multirow{13}{=}{\centering G4} & Depth, $D$ & 1670 & mm \\*
+\hhline{|~|-|-|-|}\noalign{\nobreak}
+ & Top Flange Width, $b_f$ & 510 & mm \\*
+\hhline{|~|-|-|-|}\noalign{\nobreak}
+ ...
+\end{verbatim}
+\end{codeblock}
+\item \textbf{The footer was pulled into the text area.} The footer rule was raised with \code{\textbackslash vspace\{-20pt\}} to make room for the ``* Software default value'' note, inside a default 30~pt footskip. The page geometry now reserves the space instead (bottom margin 30~mm, footskip 15~mm), and the footer contains no negative skips.
+\item \textbf{The software-default flag was unreliable.} A global boolean reset at shipout marked the wrong pages for multi-page tables. \code{\textbackslash sdstar} now writes its page number to the \code{.aux} file; on the next pass the footer prints the note exactly on the pages that carry a marked value.
+\end{enumerate}
+
+\subsection{Page-bottom thresholds (\file{styles.py}, \code{\textbackslash rptneedspace})}
+
+The original preamble used \code{\textbackslash needspace\{5\textbackslash baselineskip\}}. \code{\textbackslash needspace} leaves a \code{\textbackslash penalty-100} behind. With \code{\textbackslash raggedbottom} this made TeX prefer the point \emph{before} a long table over the breaks between its rows, which produced a stray ``Continued on next page'' line and a doubled header. It was replaced by a penalty-free guard:
+
+\begin{codeblock}
+\begin{verbatim}
+\newcommand{\rptneedspace}[1]{\par\begingroup
+  \dimen@\pagegoal \advance\dimen@-\pagetotal
+  \ifdim\dimen@<\dimexpr#1\relax\ifdim\dimen@>\z@\vfil\break\fi\fi
+  \endgroup}
+\end{verbatim}
+\end{codeblock}
+
+It is applied (with lengths from \code{SPACING}) before every table (9 lines), figure (12 lines), section heading (14 lines, so a heading is never left alone at the foot of a page) and before a heading that is followed directly by a figure (0.48 of the text height).
+
+\subsection{Short tables, notes, widows}
+
+\begin{itemize}
+\item \textbf{Short tables are kept whole.} The builder estimates the height of a table from its rows, the column widths and the text length of the cells. If the estimate is at most half the text height, \code{\textbackslash rptneedspace\{<estimate>\}} is emitted first, so the table moves to the next page instead of being split. The estimate only has to be roughly right: if it is too low the table simply breaks between rows, with repeated headers.
+\item \textbf{Notes stay with their table.} A note used to be a paragraph after the table and could be separated from it (or split in two). It is now the last, un-ruled row of the table and is bound to the row above it.
+\item \textbf{Widow/orphan control.} At least two data rows stay together below the header and before the end of a broken table.
+\end{itemize}
+
+\subsection{Table width and captions}
+
+Column widths are fractions of \code{\textbackslash rptTableWidth}, which the builder sets for every table to the line width minus cell paddings and rules. All tables therefore have exactly the text width (the original mixed 14~cm, 15.5~cm and 16.3~cm tables, some centred, some left-aligned). Captions are numbered automatically per chapter (``Table 5.3''); tables and figures of the un-numbered executive summary are numbered ``ES.1'', ``ES.2'' instead of the hand-written ``Table 1 / Figure 1''.
+
+\subsection{Live-load tables (\file{live\_loads.py}, \file{chap3.py})}
+
+\code{selected\_vehicle\_rows()} walks the eight IRC vehicles in the order of the Loading tab and keeps those whose check box key is set (plus user-defined vehicles). For each it reports the total load of one vehicle/train (IRC~6 Cl.~204), the impact factor $1+I$ for steel bridges (Cl.~208), and the braking load: considered or not (Class~SV has its own opt-in key), value $=20\%$ of the vehicle load (Cl.~211.2) and the eccentricity above the deck (Cl.~211.3, user value or 1.2~m). A second table gives the governing design braking force and the centrifugal force (Cl.~212; not applicable to the straight alignment OsdagBridge supports), a third the footpath live load (Cl.~206.1). These values are reported for information next to the inputs; the design engine is not affected.
+
+\subsection{Charts (\file{charts.py})}
+
+The charts are drawn with matplotlib's object-oriented API on an Agg canvas --- no \code{pyplot}, no global rcParams --- because the desktop application builds the report in a background \code{QThread}. Each function writes a PNG into \code{<build dir>/images} and returns its path; the chapter embeds it through \code{figures.figure()} (PyLaTeX \code{Figure}) with a path relative to the build directory. The images disappear with the temporary directory after compilation.
+
+\code{design\_summary.collect()} builds one list of governing checks (element, check, combination, demand, capacity, UR). The same list feeds the \emph{Overall Design Check Summary} table, both UR charts and the \emph{Key Design Outcomes} table of the executive summary, so they always agree. The UR~=~1.0 line, its colour, dash pattern and label come from \code{styles.CHART}.
+
+\subsection{Document assembly (\file{report\_generator.py})}
+
+The preamble is no longer a string template. \code{new\_document()} builds a \code{pylatex.Document}:
+\begin{itemize}
+\item class, paper, fonts and geometry from \code{styles.document\_arguments()},
+\item the package list from \code{styles.latex\_packages()},
+\item the style preamble from \code{styles.preamble\_tex()}.
+\end{itemize} \code{build\_document()} appends the title page, the table of contents and the chapters. The existing compile step (bundled pdflatex discovered through \code{osdag\_latex\_env}, temporary build directory) is kept; the number of passes was raised from two to three because longtable widths, page references and the footer marker each need the \code{.aux} file of the previous pass. Only packages that are part of Osdag's bundled LaTeX distribution are used.
+
+The public interface (\code{ReportRequest}, \code{ReportPayload}, \code{build\_report\_payload()}, \code{generate\_report()}) is unchanged, so the desktop application needed no modification.
+
+\section{Rationale for the layout decisions}
+
+\begin{itemize}
+\item \textbf{One builder instead of 60 templates.} Header repetition, keep-together rules and widths are properties every table must have. Implementing them once makes them impossible to forget in a new table.
+\item \textbf{Relative column widths.} Absolute widths were the reason tables had different widths and overflowed when the margins changed. Weights survive any change of the page geometry.
+\item \textbf{Unbreakable groups rather than smaller groups.} The largest group (13 rows) is about a third of a page, so keeping groups whole costs little space and removes the footer defect at its source.
+\item \textbf{Reserve footer space in the geometry.} A footer that needs negative skips to fit will collide with content sooner or later; a larger bottom margin is robust.
+\item \textbf{Left-aligned text, centred numbers, header fill in a brand tint.} Text columns are ragged-right (no stretched word gaps in narrow cells), numeric columns are centred, and the header row is visually distinct without heavy rules. Many-column tables switch to a compact font and padding through a flag of their layout.
+\item \textbf{Status as meaning, not markup.} Chapters call \code{pass\_fail()} / \code{ratio\_tex()}; how PASS, FAIL and an exceeded ratio look is decided in one place.
+\item \textbf{Charts follow the table.} Charts are placed directly after the table they summarise and use the element colours consistently in both UR charts and the tonnage chart.
+\end{itemize}
+
+\section{Content changes}\label{sec:content}
+
+The refactoring is about presentation, but a few defects in the content were fixed on the way:
+
+\begin{itemize}
+\item \emph{Reactions at Supports} (Table~4.2) was an empty three-row table; it now lists the stored reactions. Load cases are sorted (basic cases, combinations, envelopes).
+\item Girder plate dimensions were printed as ``1.67 mm'' because the optimiser writes the section keys back in metres; \code{dimension\_mm()} converts them. Floating-point noise such as \code{11.399999999999999} is trimmed.
+\item The executive summary stated ``Girder design pass \dots'' as fixed text; the outcome table now reflects the actual results (the sample design fails in fatigue, UR~1.87).
+\item The Section~5.5 summary gained the transverse-shear row from stored values and a Status column; the end-diaphragm rows are labelled compression/tension (they were labelled moment/shear but showed bracing forces).
+\item End diaphragms: when the analysis stores no separate end-diaphragm member forces (as in the sample design), the report --- like upstream --- shows the governing cross-bracing member design for a bracing-type diaphragm. This is now stated in a note under the tables instead of being silent.
+\item The bill of materials has a row for the end diaphragms.
+\end{itemize}
+
+\section{Verification}
+
+\begin{itemize}
+\item \textbf{Unit tests:} \code{pytest tests/unit/test\_report\_layout.py} --- 29 tests: header repetition (one- and two-level), unbreakable groups, notes, table widths, footer geometry, absence of formatting in chapter files, layout names, live-load data, chart files and the threshold line, design summary, assembly of the whole document.
+\item \textbf{LaTeX log:} the after-report compiles without errors; 60 pages.
+\item \textbf{Footer clearance, measured:} every page of both PDFs was rasterised and the distance between the lowest content and the footer rule was measured. Before: 1.6~mm at the worst page, below 5~mm on six pages. After: at least 11.8~mm on every page (the two pages carrying the ``* Software default value'' footer note excepted --- the note is part of the footer).
+\item \textbf{Visual check:} every page of the after-report was rendered and inspected: all continued tables carry caption and header, no table or label touches the footer, no heading is left at the bottom of a page.
+\item \textbf{Same data:} values were spot-checked against the before-report (e.g. deflections, fatigue ratios, quantities).
+\end{itemize}
+
+\section{Reproducing the reports}
+
+\begin{codeblock}
+\begin{verbatim}
+# real GUI run: location, span, Design, Generate Report (same arguments for before and after)
+python tools/report_demo.py --out out/Report_After.pdf --district Pune \
+       --designer "Vivek Manik Warkad" --payload out/payload.pkl
+
+# fast re-render of the stored design (no GUI, no analysis) while working on the layout
+python tools/render_report.py out/payload.pkl --out out/Report_After.pdf
+
+pytest tests/unit/test_report_layout.py
+\end{verbatim}
+\end{codeblock}
+
+\textbf{Environment note.} Development was done on macOS (Apple silicon). \file{environment.yml} cannot be solved there as it is, because the \code{osdag} conda package depends on \code{osdag\_latex\_env}, which is published for Linux and Windows only. The environment was created from the same channels with \code{osdag} installed without that dependency, and TinyTeX provided \code{pdflatex}. The report code itself is platform independent and uses only LaTeX packages contained in \code{osdag\_latex\_env}.
+
+\section{Known limitations}
+
+\begin{itemize}
+\item The height estimate for short tables is a heuristic based on text length; a table with unusually tall cells may still be split (it then breaks cleanly with repeated headers).
+\item Wind force components and the number of design lanes are shown as ``---'' when the design run does not store them; this is unchanged from upstream.
+\item Per-girder tables repeat identical values for every girder because the design engine stores one governing section; the structure was kept so that girder-specific results can be filled in later without touching the layout.
+\end{itemize}
+
+\end{document}
