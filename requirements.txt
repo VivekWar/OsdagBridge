@@ -8,3 +8,7 @@ pydantic
 xarray
 ifcopenshell
 openpyxl
+
+# Design report (PyLaTeX document / LongTable / Figure builders, bar charts)
+pylatex>=1.4.1
+matplotlib>=3.5
