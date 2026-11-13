@@ -1,20 +1,27 @@
 # =============================================================================
-# OsdagBridge — Report Generator  
-# Matches OsdagBridge expected report format:
-#   • Full title page with logo
-#   • Numbered TOC (Executive Summary + Chapters 1-9)
-#   • Executive Summary with Project Overview table, Key Design Outcomes,
-#     Figure 1/2/3, and Design Assumptions
+# OsdagBridge — Report Generator (orchestration)
+#
+# Builds the design report as a PyLaTeX ``Document`` and compiles it to PDF:
+#   • title page, table of contents, executive summary
 #   • Chapter 1  Project Information
-#   • Chapter 2  Input Parameters (Tables 1-7: section, bracing, shear
-#                connectors, partial safety factors)
-#   • Chapter 3  Loads & Load Combinations (Tables 8-14)
-#   • Chapter 4  Analysis Results (Tables 15-17 + figure placeholders)
-#   • Chapter 5  Design Checks (Tables 18-39, all IRC 22 / IS 800 checks)
-#   • Chapter 6  Drawings & Visualizations (6 sub-sections, 8 figures)
-#   • Chapter 7  Material Take-off & Quantity Summary (Table 40)
-#   • Chapter 8  Design Standards & References (Table 41 + reference list)
-#   • Chapter 9  References (13 entries)
+#   • Chapter 2  Input Parameters
+#   • Chapter 3  Loads & Load Combinations
+#   • Chapter 4  Analysis Results
+#   • Chapter 5  Design Checks (incl. utilization-ratio charts, Section 5.5)
+#   • Chapter 6  Drawings & Visualizations
+#   • Chapter 7  Material Take-off & Quantity Summary (incl. quantity charts)
+#   • Chapter 8  Design Log
+#   • References
+#
+# Module map of this package
+#   styles.py          single source of truth for ALL formatting
+#   tables.py          table builder (PyLaTeX LongTable, repeated headers)
+#   figures.py         figure builder (PyLaTeX Figure)
+#   charts.py          matplotlib bar charts (UR and material quantities)
+#   live_loads.py      live-load data for Chapter 3
+#   design_summary.py  governing design checks for Section 5.5 / exec. summary
+#   data_bridge.py     read-only access to the stored design results
+#   chap1.py … chap9.py, executive_summary.py   content of each chapter
 # =============================================================================
 
 # =============================================================================
@@ -105,10 +112,12 @@
 
 import os, shutil, logging, datetime, tempfile, subprocess
 from dataclasses import dataclass, field
-from typing import Optional, List, Literal
+from typing import Optional, List
+
+from pylatex import Document, Package
+from pylatex.utils import NoEscape
 
 from osdagbridge.core.utils.common import (
-    KEY_DESIGN_MODE,
     KEY_SPAN,
     KEY_TL_BRIDGE_TEMP_MAX,
     KEY_TL_BRIDGE_TEMP_MIN,
@@ -118,7 +127,11 @@ from osdagbridge.core.utils.common import (
     KEY_TL_TEMP_RISE
 )
 
-from osdagbridge.core.reports.report_utils import _tex
+from . import figures as F
+from . import styles as S
+from . import tables as T
+from .data_bridge import ReportDataBridge
+from .report_utils import _tex
 from .executive_summary import executive_summary
 from .chap1 import ch1_project_info
 from .chap2 import ch2_input_parameters
@@ -132,254 +145,137 @@ from .chap9 import references
 
 logger = logging.getLogger(__name__)
 
-# --- TEMPLATES START ---
+# Number of pdflatex passes: table of contents, "Page x of y", longtable
+# column widths and the software-default footer marker all need the .aux file
+# of the previous pass.
+LATEX_PASSES = 3
+
+# Sub-directories of the temporary build directory (paths in the document are
+# relative to the build directory, so no absolute path ever reaches LaTeX).
+IMAGE_DIR = "images"        # captured CAD / analysis figures and generated charts
+ASSET_DIR = "assets"        # title-page logos
 
 
 # =============================================================================
-# LaTeX template sections for OsdagBridge Design Report
-# Matches the LaTeX template used in the OsdagBridge desktop application.
-# Color: osdagGreen = #91B014
+# Document assembly (PyLaTeX)
 # =============================================================================
+# All formatting comes from styles.py: the Document arguments (class, paper,
+# margins, fonts), the package list and the style preamble are emitted there.
 
+def new_document(metadata) -> Document:
+    """Empty report document with the complete style preamble."""
+    doc = Document(**S.document_arguments())
+    for name, options in S.latex_packages():
+        doc.packages.append(Package(name, options=options))
 
+    header_left, header_right = S.header_fields(
+        _tex(metadata.project_name), _tex(metadata.job_number),
+        _tex(metadata.report_date), _tex(metadata.subtitle or 'Rev 0'))
+    doc.preamble.append(NoEscape(S.preamble_tex(
+        header_left, header_right,
+        pdf_title=_tex(metadata.project_name) + " --- " + S.TEXT.report_kind,
+        pdf_author=_tex(metadata.designer))))
+    return doc
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PREAMBLE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def preamble(project_name, job_number, report_date, report_version='Rev 0'):
-    pn = _tex(project_name)
-    jn = _tex(job_number)
-    rd = _tex(report_date)
-    rv = _tex(report_version)
-    return r"""
-\documentclass[12pt,a4paper]{report}
-
-% Packages
-\usepackage[a4paper, margin=1in]{geometry}
-\usepackage{graphicx}
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{booktabs}
-\usepackage{array}
-\usepackage{tabularx}
-\usepackage{float}
-\usepackage{fancyhdr}
-\usepackage[hidelinks]{hyperref}
-\usepackage{xcolor}
-\usepackage{setspace}
-\usepackage{enumitem}
-\usepackage{caption}
-
-\captionsetup{
-    labelfont=bf,
-    justification=raggedright,
-    singlelinecheck=false,
-    format=plain
-}
-\usepackage{subcaption}
-\usepackage{multirow}
-\usepackage{colortbl}
-\usepackage{longtable}
-\setlength{\LTleft}{\fill}
-\setlength{\LTright}{\fill}
-\usepackage{titlesec}
-\usepackage{titletoc}
-\usepackage{lastpage}
-\usepackage{makecell}
-\usepackage{etoolbox}
-\usepackage{needspace}
-
-\numberwithin{table}{chapter}
-\numberwithin{figure}{chapter}
-% Table layout and spacing: consistent padding, row height, and longtable pre/post skips
-\setlength{\tabcolsep}{6pt}
-\renewcommand{\arraystretch}{1.12}
-\setlength{\LTpre}{0pt}
-\setlength{\LTpost}{6pt}
-% Table rules (outline thickness) and small extra row height for clarity
-\setlength{\arrayrulewidth}{0.5pt}
-\setlength{\extrarowheight}{0.6pt}
-
-% Prevent tables from overflowing past the page bottom:
-% if fewer than 5 baseline-skips remain, break to the next page first.
-\BeforeBeginEnvironment{table}{\needspace{5\baselineskip}}
-\BeforeBeginEnvironment{longtable}{\needspace{5\baselineskip}}
-
-\definecolor{osdagGreen}{HTML}{91B014}
-
-\fancypagestyle{main}{
-  \fancyhf{}
-  \fancyhead[L]{""" + pn + r""" $|$ """ + jn + r"""}
-  \fancyhead[R]{""" + rd + r""" $|$ """ + rv + r"""}
-  \fancyfoot[L]{Osdag $|$ FOSSEE $|$ Indian Institute of Technology Bombay}
-  \fancyfoot[R]{Page \thepage\ of \pageref{LastPage}}
-  \renewcommand{\headrule}{\color{osdagGreen}\hrule width\headwidth height 1pt \vspace{2pt}}
-  \renewcommand{\footrule}{%
-    \ifbool{hasSDonPage}{%
-      \vspace{-20pt}%
-      \hbox to \headwidth{\textcolor{black}{\footnotesize\textit{* Software default value}}\hfil}%
-      \vspace{4pt}%
-    }{%
-      \vspace{-8pt}%
-    }%
-    \color{osdagGreen}\hrule width\headwidth height 1pt \vspace{6pt}%
-  }
-}
-\fancypagestyle{plain}{
-  \fancyhf{}
-  \fancyhead[L]{""" + pn + r""" $|$ """ + jn + r"""}
-  \fancyhead[R]{""" + rd + r""" $|$ """ + rv + r"""}
-  \fancyfoot[L]{Osdag $|$ FOSSEE $|$ Indian Institute of Technology Bombay}
-  \fancyfoot[R]{Page \thepage\ of \pageref{LastPage}}
-  \renewcommand{\headrule}{\color{osdagGreen}\hrule width\headwidth height 1pt \vspace{2pt}}
-  \renewcommand{\footrule}{%
-    \ifbool{hasSDonPage}{%
-      \vspace{-20pt}%
-      \hbox to \headwidth{\textcolor{black}{\footnotesize\textit{* Software default value}}\hfil}%
-      \vspace{4pt}%
-    }{%
-      \vspace{-8pt}%
-    }%
-    \color{osdagGreen}\hrule width\headwidth height 1pt \vspace{6pt}%
-  }
-}
-\fancypagestyle{firstpage}{
-  \fancyhf{}
-  \renewcommand{\headrulewidth}{0pt}
-  \fancyfoot[L]{Osdag $|$ FOSSEE $|$ Indian Institute of Technology Bombay}
-  \fancyfoot[R]{Page \thepage\ of \pageref{LastPage}}
-  \renewcommand{\footrule}{\vspace{-8pt}\color{osdagGreen}\hrule width\headwidth height 1pt \vspace{6pt}}
-}
-\pagestyle{main}
-\setstretch{1.15}
-
-% Custom Commands
-\newcommand{\placeholder}[1]{\textit{\textless #1\textgreater}}
-\newcommand{\todo}[1]{\colorbox{yellow}{TODO: #1}}
-\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
-\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
-\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
-
-% Software-default asterisk
-\newcommand{\sdstar}{\textsuperscript{*}}
-\newbool{hasSDonPage}
-\boolfalse{hasSDonPage}
-\newcommand{\markSD}{\global\booltrue{hasSDonPage}}
-\renewcommand{\sdstar}{\textsuperscript{*}\markSD{}}
-\AddToHook{shipout/before}{\global\boolfalse{hasSDonPage}}
-
-\title{\Large\textbf{OsdagBridge} \\ \normalsize Open Source Software for Steel Girder Bridge Design \\ \vspace{2cm} \large Design Report}
-\author{}
-\date{}
-
-\begin{document}
-"""
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TITLE PAGE
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def title_page(m, osdag_logo, org_logo):
+    """Title page: logos, product title and the project information block."""
+    fig, sp, fonts, text = S.FIGURE, S.SPACING, S.FONTS, S.TEXT
     if osdag_logo:
-        lhs = r'\includegraphics[width=\linewidth,keepaspectratio]{' + osdag_logo.replace('\\', '/') + r'}'
+        lhs = r"\includegraphics[width=\linewidth,keepaspectratio]{\detokenize{%s}}" % osdag_logo
     else:
-        lhs = r'\textit{(Osdag Logo)}'
-
+        lhs = r"\placeholder{Osdag logo}"
     if org_logo:
-        rhs = r'\includegraphics[width=\linewidth,height=2.2cm,keepaspectratio]{' + org_logo.replace('\\', '/') + r'}'
+        rhs = (r"\includegraphics[width=\linewidth,height=%s,keepaspectratio]{\detokenize{%s}}"
+               % (fig.logo_right_height, org_logo))
     else:
-        rhs = r''
+        rhs = ""
 
-    logos_tex = r"""\noindent
-\begin{minipage}[c]{0.6\textwidth}
-\raggedright
-""" + lhs + r"""
-\end{minipage}%
-\hfill
-\begin{minipage}[c]{0.35\textwidth}
-\raggedleft
-""" + rhs + r"""
-\end{minipage}
-\\[1cm]
-"""
+    info = T.plain_block("title_block", [
+        ("Project Name", _tex(m.project_name)),
+        ("Project Location", _tex(m.project_location)),
+        ("Author / Designer", _tex(m.designer)),
+        ("Reviewer", _tex(m.reviewer)),
+        ("Organization", _tex(m.company)),
+        ("Client Name and Organization", _tex(m.client)),
+        ("Job Number", _tex(m.job_number)),
+        ("Date", _tex(m.report_date)),
+        ("Report Version", _tex(m.subtitle) if m.subtitle else ''),
+    ])
+    return "\n".join([
+        r"\begin{titlepage}",
+        r"\thispagestyle{firstpage}",
+        r"\centering",
+        r"\vspace*{%s}" % sp.title_top,
+        r"\noindent\begin{minipage}[c]{%.2f\textwidth}\raggedright" % fig.logo_left_width,
+        lhs,
+        r"\end{minipage}\hfill",
+        r"\begin{minipage}[c]{%.2f\textwidth}\raggedleft" % fig.logo_right_width,
+        rhs,
+        r"\end{minipage}\par",
+        r"\vspace{%s}" % sp.title_logo_gap,
+        r"{%s\color{rptText} %s\par}" % (fonts.title_main, text.product),
+        r"\vspace{4mm}",
+        r"{%s\color{rptMuted} %s\par}" % (fonts.title_sub, text.tagline),
+        r"\vspace{6mm}",
+        r"{\color{osdagGreen}\rule{0.35\textwidth}{1.2pt}\par}",
+        r"\vspace{6mm}",
+        r"{%s\color{osdagDark} %s\par}" % (fonts.title_kind, text.report_kind),
+        r"\vspace{%s}" % sp.title_block_gap,
+        r"{%s" % fonts.table_body,
+        info + r"}",
+        r"\end{titlepage}",
+        # The title page is page 1: keep "Page x of y" continuous with the PDF.
+        r"\setcounter{page}{2}",
+    ]) + "\n"
 
-    return r"""
-\begin{titlepage}
-\thispagestyle{firstpage}
-\centering
-\vspace*{1.5cm}
-""" + logos_tex + r"""
-{\Huge \textbf{OsdagBridge}}\\[0.3cm]
-{\large Open Source Software for Steel Girder Bridge Design}\\[1.5cm]
-{\Large Design Report}\\[1.5cm]
-\begin{tabular}{|L{4cm}|L{10cm}|}
-\hline
-\textbf{Project Name} & """ + _tex(m.project_name) + r""" \\
-\hline
-\textbf{Project Location} & """ + _tex(m.project_location) + r""" \\
-\hline
-\textbf{Author / Designer} & """ + _tex(m.designer) + r""" \\
-\hline
-\textbf{Reviewer} & """ + _tex(m.reviewer) + r""" \\
-\hline
-\textbf{Organization} & """ + _tex(m.company) + r""" \\
-\hline
-\textbf{Client Name and Organization} & """ + _tex(m.client) + r""" \\
-\hline
-\textbf{Job Number} & """ + _tex(m.job_number) + r""" \\
-\hline
-\textbf{Date} & """ + _tex(m.report_date) + r""" \\
-\hline
-\textbf{Report Version} & """ + (_tex(m.subtitle) if m.subtitle else '') + r""" \\
-\hline
-\end{tabular}
-\end{titlepage}
-"""
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TOC
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def toc_section():
-    return r"""
-% Chapter / TOC Formatting
-\titleformat{\chapter}[block]
-  {\normalfont\Large\bfseries\centering}{\thechapter}{1em}{}
-\titlespacing*{\chapter}{0pt}{0pt}{10pt}
-\setcounter{tocdepth}{2}
-
-% TOC styling using titletoc
-\titlecontents{chapter}[1.5em]
-  {\normalfont\vspace{2pt}}
-  {\contentslabel{1.5em}}
-  {\hspace*{-1.5em}}
-  {\hfill\contentspage}
-
-\titlecontents{section}[3.8em]
-  {\normalfont}
-  {\contentslabel{2.3em}}
-  {\hspace*{-2.3em}}
-  {\hfill\contentspage}
-
-\titlecontents{subsection}[7.0em]
-  {\normalfont}
-  {\contentslabel{3.2em}}
-  {\hspace*{-3.2em}}
-  {\hfill\contentspage}
-
-\newpage
-\renewcommand{\contentsname}{\centering\Large\bfseries Table of Contents}
-\tableofcontents
-"""
+    """Table of contents (its look is defined in styles.py)."""
+    return "\n".join([
+        r"\clearpage",
+        r"\tableofcontents",
+        r"\clearpage",
+    ]) + "\n"
 
 
-# =============================================================================
-# Chapter modules are now imported from the dedicated report submodules.
-# report_generator.py remains the orchestration entry point.
-# =============================================================================
+def build_document(payload, fig_paths, osdag_logo, org_logo, asset_dir) -> Document:
+    """Assemble the complete report.
+
+    ``fig_paths`` maps a figure name to its image path relative to the build
+    directory; ``asset_dir`` is the directory the generated charts are written
+    to (inside the build directory).
+    """
+    doc = new_document(payload.metadata)
+    add = lambda tex: doc.append(NoEscape(tex))
+
+    add(title_page(payload.metadata, osdag_logo, org_logo))
+    if payload.options.include_toc:
+        add(toc_section())
+
+    # Chapter inclusion is driven by the canonical section keys selected in
+    # the report-options dialog. The first three parts are locked in the UI,
+    # so they are always present.
+    secs = payload.options.sections
+    bridge = ReportDataBridge(payload.output_dict, payload.inputs, payload)
+    span_m = float(payload.inputs.get(KEY_SPAN, 0) or 0)
+
+    add(executive_summary(payload.inputs, payload.output_dict, fig_paths))
+    add(ch1_project_info(payload.metadata))
+    add(ch2_input_parameters(payload.metadata, payload.inputs, payload.output_dict))
+    if 'loads' in secs:
+        add(ch3_loads(payload.inputs))
+    if 'analysis' in secs:
+        add(ch4_analysis(payload.analysis_summary, fig_paths, bridge, span_m))
+    if 'design_checks' in secs:
+        add(ch5_design_checks(payload.design_checks, bridge, asset_dir))
+    if 'drawings' in secs and payload.options.include_figures:
+        add(ch6_drawings(fig_paths))
+    add(ch7_quantities(payload.inputs, asset_dir))
+    add(ch8_design_log(payload.log_entries, payload.inputs))
+    add(references())
+    return doc
+
 
 # ---------------------------------------------------------------------------
 # Public data-classes 
@@ -448,190 +344,6 @@ class ReportResult:
     pdf_path: Optional[str]
     tex_path: Optional[str]
 
-
-class ReportDataBridge:
-    """Centralized data extraction for the OsdagBridge report."""
-
-
-
-    def __init__(self, output_dict: dict, input_dict: dict, payload: "ReportPayload"):
-        self.output_dict = output_dict
-        self.input_dict = input_dict
-        self.payload = payload
-
-
-    # =====================================================================
-    # CHAPTER 5: CROSS BRACING
-    # =====================================================================
-
-    def _cb_forces_dict(self) -> dict:
-        """Internal: return crossbracing_forces_dict from output_dict."""
-        return self.output_dict.get("crossbracing_forces_dict", {})
-
-    def _cb_pair_designs(self) -> dict:
-        """Internal: return crossbracing_design_results from output_dict."""
-        return self.output_dict.get("crossbracing_design_results", {})
-
-    def _cb_osdag(self, pair: str, member: str, force_type: str) -> dict:
-        """
-        Extract the _extract_osdag_summary dict for one member.
-        pair      e.g. "G1-G2"
-        member    "diagonal" or "chord"
-        force_type "tension" or "compression"
-        """
-        from osdagbridge.core.bridge_types.plate_girder.results_data import _extract_osdag_summary
-        try:
-            raw = self._cb_pair_designs()[pair][member][force_type]
-            return _extract_osdag_summary(raw or {})
-        except (KeyError, TypeError):
-            return {}
-
-    def get_cb_pairs(self) -> list:
-        """Return sorted list of girder pair keys e.g. ['G1-G2', 'G2-G3']."""
-        try:
-            return sorted(self._cb_forces_dict().get("pairs", {}).keys())
-        except Exception:
-            return []
-
-    def get_cb_geometry(self) -> dict:
-        """Return the geometry sub-dict from forces_dict."""
-        return self._cb_forces_dict().get("geometry", {})
-
-    def get_cb_brace_type(self) -> str:
-        try:
-            return self._cb_forces_dict().get("brace_type", "X")
-        except Exception:
-            return "X"
-
-    # --- Table 5.20(a): Member Forces ---
-
-    def get_cb_force(self, pair: str, member: str, force_type: str) -> str:
-        """
-        Return demand force string for table 5.20(a).
-        member: "diagonal" or "chord"
-        force_type: "tension" or "compression"
-        """
-        try:
-            pairs = self._cb_forces_dict()["pairs"][pair]
-            key = f"diag_{force_type}_kN" if member == "diagonal" else f"chord_{force_type}_kN"
-            val = pairs.get(key)
-            if val is not None:
-                return f"{val:.3f}"
-        except (KeyError, TypeError):
-            pass
-        return ""
-
-    def get_cb_nature(self, pair: str, member: str) -> str:
-        """Return 'T', 'C', or 'T/C' depending on what forces exist for this member."""
-        try:
-            pairs = self._cb_forces_dict()["pairs"][pair]
-            t_key = "diag_tension_kN"     if member == "diagonal" else "chord_tension_kN"
-            c_key = "diag_compression_kN" if member == "diagonal" else "chord_compression_kN"
-            has_t = pairs.get(t_key) is not None
-            has_c = pairs.get(c_key) is not None
-            if has_t and has_c:
-                return "T / C"
-            if has_t:
-                return "T"
-            if has_c:
-                return "C"
-        except (KeyError, TypeError):
-            pass
-        return ""
-
-    def get_cb_governing_force(self, pair: str, member: str) -> tuple:
-        """
-        Return (force_kN_str, force_type) for the governing (max absolute) force.
-        Used as the single demand value for capacity tables.
-        """
-        try:
-            pairs = self._cb_forces_dict()["pairs"][pair]
-            t_key = "diag_tension_kN"     if member == "diagonal" else "chord_tension_kN"
-            c_key = "diag_compression_kN" if member == "diagonal" else "chord_compression_kN"
-            t_val = pairs.get(t_key)
-            c_val = pairs.get(c_key)
-            if t_val is not None and c_val is not None:
-                if abs(c_val) >= abs(t_val):
-                    return (f"{c_val:.3f}", "compression")
-                return (f"{t_val:.3f}", "tension")
-            if c_val is not None:
-                return (f"{c_val:.3f}", "compression")
-            if t_val is not None:
-                return (f"{t_val:.3f}", "tension")
-        except (KeyError, TypeError):
-            pass
-        return ("", "compression")
-
-    def get_cb_section(self, pair: str, member: str, force_type: str) -> str:
-        """Section designation for a member e.g. '75 x 75 x 8'."""
-        val = self._cb_osdag(pair, member, force_type).get("section")
-        return _tex(val) if val else ""
-
-    def get_cb_capacity(self, pair: str, member: str, force_type: str) -> str:
-        """Capacity in kN."""
-        val = self._cb_osdag(pair, member, force_type).get("capacity_kN")
-        return f"{float(val):.3f}" if val is not None else ""
-
-    def get_cb_efficiency(self, pair: str, member: str, force_type: str) -> str:
-        """Utilization ratio (efficiency)."""
-        val = self._cb_osdag(pair, member, force_type).get("efficiency")
-        return f"{float(val):.3f}" if val is not None else ""
-
-    def get_cb_slenderness(self, pair: str, member: str) -> str:
-        """KL/r — same for tension and compression (geometry-based)."""
-        # Prefer compression result (slenderness is more meaningful there)
-        for ft in ("compression", "tension"):
-            val = self._cb_osdag(pair, member, ft).get("slenderness")
-            if val is not None:
-                return f"{float(val):.1f}"
-        return ""
-
-    def get_cb_status(self, pair: str, member: str, force_type: str) -> str:
-        """PASS / FAIL based on UR <= 1.0."""
-        try:
-            val = self._cb_osdag(pair, member, force_type).get("efficiency")
-            if val is not None:
-                ur = float(val)
-                if ur <= 1.0:
-                    return r"\textcolor{black}{PASS}"
-                return r"\textcolor{red}{FAIL}"
-        except (TypeError, ValueError):
-            pass
-        return ""
-
-    def get_cb_gov_lc(self, pair: str, member: str, force_type: str) -> str:
-        """Governing load case label for member (tension or compression)."""
-        try:
-            pfx = "diag" if member == "diagonal" else "chord"
-            key = f"{pfx}_{force_type}_gov_lc"
-            val = self._cb_forces_dict()["pairs"][pair].get(key)
-            return _tex(val) if val else ""
-        except (KeyError, TypeError):
-            return ""
-
-    def get_cb_connection(self, pair: str, member: str, force_type: str) -> str:
-        """Return 'Welded' or 'Bolted'."""
-        val = self._cb_osdag(pair, member, force_type).get("connection")
-        return str(val) if val else ""
-
-    def get_cb_effective_length(self, member: str) -> str:
-        """Effective length KL in mm from geometry."""
-        try:
-            geom = self.get_cb_geometry()
-            if member == "diagonal":
-                L_m = geom.get("diagonal_length_m", 0)
-            else:
-                L_m = geom.get("horiz_proj_m", 0)
-            return f"{L_m * 1000:.0f}"   # convert m → mm
-        except (TypeError, ValueError):
-            return ""
-
-    def get_cb_alpha_deg(self) -> str:
-        """Diagonal angle in degrees."""
-        try:
-            return f"{self.get_cb_geometry().get('alpha_deg', 0):.2f}"
-        except Exception:
-            return ""
 
 def _format_project_location(pl_data):
     if not pl_data:
@@ -865,7 +577,9 @@ def generate_report(payload, request):
         with tempfile.TemporaryDirectory() as tmp_dir:
 
             # ── Write figure bytes into tmp_dir/images/ then free RAM immediately ──
-            tmp_images = os.path.join(tmp_dir, 'images')
+            # LaTeX sees the images through paths relative to the build
+            # directory ("images/<name>.png"), never through absolute paths.
+            tmp_images = os.path.join(tmp_dir, IMAGE_DIR)
             os.makedirs(tmp_images, exist_ok=True)
             fig_paths = {}
             for attr, img_bytes in list(payload.figure_data.items()):
@@ -873,12 +587,12 @@ def generate_report(payload, request):
                     p = os.path.join(tmp_images, attr + '.png')
                     with open(p, 'wb') as fh:
                         fh.write(img_bytes)
-                    fig_paths[attr] = p.replace('\\', '/')
+                    fig_paths[attr] = F.latex_path(p, tmp_dir)
             payload.figure_data.clear()  # bytes no longer needed — free RAM now
 
             # ── Write title-page logos into tmp_dir/assets (auto-deleted) ──
             # Nothing is left next to the PDF. Latex paths are relative to tmp_dir.
-            tmp_assets = os.path.join(tmp_dir, 'assets')
+            tmp_assets = os.path.join(tmp_dir, ASSET_DIR)
             os.makedirs(tmp_assets, exist_ok=True)
 
             osdag_logo_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'ResourceFiles', 'vectors', 'Osdag Logo.png')
@@ -887,65 +601,23 @@ def generate_report(payload, request):
             osdag_logo_latex = None
             if os.path.exists(osdag_logo_src):
                 shutil.copy2(osdag_logo_src, os.path.join(tmp_assets, 'osdag_logo.png'))
-                osdag_logo_latex = 'assets/osdag_logo.png'
+                osdag_logo_latex = ASSET_DIR + '/osdag_logo.png'
 
             org_logo_latex = None
             org_logo_src = payload.metadata.logo_path if (payload.metadata.logo_path and os.path.exists(payload.metadata.logo_path)) else (iit_logo_src if os.path.exists(iit_logo_src) else None)
             if org_logo_src:
                 shutil.copy2(org_logo_src, os.path.join(tmp_assets, 'org_logo.png'))
-                org_logo_latex = 'assets/org_logo.png'
+                org_logo_latex = ASSET_DIR + '/org_logo.png'
 
             # Compute and inject quantities for Chapter 7
             quantities = calculate_material_quantities(payload.inputs, payload.output_dict)
             payload.inputs.update(quantities)
 
-            # ── Assemble LaTeX document (fig_paths now has tmp_dir paths) ──
-            bridge = ReportDataBridge(payload.output_dict, payload.inputs, payload)
-            span_m = float(payload.inputs.get(KEY_SPAN, 0) or 0)
-
-            doc_parts = []
-            doc_parts.append(preamble(payload.metadata.project_name, payload.metadata.job_number, payload.metadata.report_date, payload.metadata.subtitle or 'Rev 0'))
-            doc_parts.append(title_page(payload.metadata, osdag_logo_latex, org_logo_latex))
-
-            if payload.options.include_toc:
-                doc_parts.append(toc_section())
-
-            # Chapter inclusion is driven by the canonical section keys
-            # selected in the report-options dialog (TOC). The first three
-            # chapters are locked in the UI, so they are always present.
-            secs = payload.options.sections
-
-            doc_parts.append(executive_summary(payload.inputs, payload.output_dict, fig_paths))
-            doc_parts.append(ch1_project_info(payload.metadata))
-            doc_parts.append(ch2_input_parameters(payload.metadata, payload.inputs, payload.output_dict))
-
-            if 'loads' in secs:
-                doc_parts.append(ch3_loads(payload.inputs))
-            if 'analysis' in secs:
-                doc_parts.append(ch4_analysis(payload.analysis_summary, fig_paths, bridge, span_m))
-            if 'design_checks' in secs:
-                doc_parts.append(ch5_design_checks(payload.design_checks, bridge))
-            if 'drawings' in secs and payload.options.include_figures:
-                doc_parts.append(ch6_drawings(fig_paths))
-
-            doc_parts.append(ch7_quantities(payload.inputs))
-
-            mode = str(payload.inputs.get(KEY_DESIGN_MODE, "Optimized")).strip().lower()
-            is_custom = mode in {"custom", "customized"}
-        
-
-            doc_parts.append(ch8_design_log(payload.log_entries, payload.inputs))
-
-            doc_parts.append(references())
-            doc_parts.append(r"\end{document}")
-
-            full_tex = "\n".join(doc_parts)
-
-
-            # NOTE: longtable header repetition is handled per-table in each
-            # chapter file (e.g. \endfirsthead / \endhead).  No automatic
-            # post-processing is applied here to avoid mis-ordering captions
-            # and column headings.
+            # ── Assemble the PyLaTeX document ──
+            # The bar charts (Section 5.5 and Chapter 7) are generated while
+            # the chapters are built and saved into tmp_dir/images as well.
+            doc = build_document(payload, fig_paths, osdag_logo_latex, org_logo_latex, tmp_images)
+            full_tex = doc.dumps()
 
             tmp_tex = os.path.join(tmp_dir, request.file_stem + '.tex')
             tmp_pdf = os.path.join(tmp_dir, request.file_stem + '.pdf')
@@ -953,8 +625,8 @@ def generate_report(payload, request):
             with open(tmp_tex, 'w', encoding='utf-8') as f:
                 f.write(full_tex)
 
-            # Compile twice for TOC and references
-            for _ in range(2):
+            # Several passes: TOC, page references, longtable widths, footer marker
+            for _ in range(LATEX_PASSES):
                 try:
                     kwargs = {
                         'cwd': tmp_dir,
@@ -965,13 +637,18 @@ def generate_report(payload, request):
                     }
                     if os.name == 'nt':
                         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-                    
+
                     res = subprocess.run(
                         [compiler, '-interaction=nonstopmode', request.file_stem + '.tex'],
                         **kwargs
                     )
                 except Exception as exc:
                     logger.warning(f"pdflatex run failed: {exc}")
+
+            # Keep the LaTeX log next to the .tex source when requested (debugging).
+            tmp_log = os.path.join(tmp_dir, request.file_stem + '.log')
+            if os.environ.get('OSDAGBRIDGE_REPORT_KEEP_LOG') and os.path.exists(tmp_log):
+                shutil.copy2(tmp_log, os.path.join(request.output_dir, request.file_stem + '.log'))
 
             if os.path.exists(tmp_tex):
                 shutil.copy2(tmp_tex, tex_path)
